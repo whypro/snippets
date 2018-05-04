@@ -1,0 +1,25 @@
+apiVersion: ke.qiniu.com/v1
+kind: TLB
+metadata:
+  labels:
+    ke-misc/tlb-svc: angry-toucan-stolon-proxy
+  name: angry-toucan-stolon-proxy
+  namespace: stolon
+spec:
+  bandwidthLimit: 1
+  chargeMode: bandwidth
+  ipType: telecom
+  policy: roundrobin
+  serviceSpec:
+    ports:
+    - name: port-15432
+      port: 15432
+      protocol: TCP
+      targetPort: 5432
+    selector:
+      app: stolon-proxy
+      chart: stolon-0.5.0
+      component: proxy
+      release: angry-toucan
+      stolon-cluster: angry-toucan-stolon
+

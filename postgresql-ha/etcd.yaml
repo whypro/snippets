@@ -1,0 +1,192 @@
+apiVersion: apps/v1beta1
+kind: StatefulSet
+metadata:
+  labels:
+    app: stolon-etcd
+  name: stolon-etcd
+  namespace: stolon
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: stolon-etcd
+  serviceName: stolon-etcd
+  template:
+    metadata:
+      name: stolon-etcd
+      labels:
+        app: stolon-etcd
+    spec:
+      containers:
+      - command:
+        - /bin/sh
+        - -ec
+        - |
+          HOSTNAME=$(hostname)
+          # store member id into PVC for later member replacement
+          collect_member() {
+              while ! etcdctl member list &>/dev/null; do sleep 1; done
+              etcdctl member list | grep http://${HOSTNAME}.${SET_NAME}:2380 | cut -d':' -f1 | cut -d'[' -f1 > /var/lib/etcd/member_id
+              exit 0
+          }
+          eps() {
+              EPS=""
+              for i in $(seq 0 $((${INITIAL_CLUSTER_SIZE} - 1))); do
+                  EPS="${EPS}${EPS:+,}http://${SET_NAME}-${i}.${SET_NAME}:2379"
+              done
+              echo ${EPS}
+          }
+          member_hash() {
+              etcdctl member list | grep http://${HOSTNAME}.${SET_NAME}:2380 | cut -d':' -f1 | cut -d'[' -f1
+          }
+          initial_peers() {
+                PEERS=""
+                for i in $(seq 0 $((${INITIAL_CLUSTER_SIZE} - 1))); do
+                PEERS="${PEERS}${PEERS:+,}${SET_NAME}-${i}=http://${SET_NAME}-${i}.${SET_NAME}:2380"
+                done
+                echo ${PEERS}
+          }
+          # etcd-SET_ID
+          SET_ID=${HOSTNAME##*-}
+          # adding a new member to existing cluster (assuming all initial pods are available)
+          if [ "${SET_ID}" -ge ${INITIAL_CLUSTER_SIZE} ]; then
+              export ETCDCTL_ENDPOINT=$(eps)
+              # member already added?
+              MEMBER_HASH=$(member_hash)
+              if [ -n "${MEMBER_HASH}" ]; then
+                  # the member hash exists but for some reason etcd failed
+                  # as the datadir has not be created, we can remove the member
+                  # and retrieve new hash
+                  etcdctl member remove ${MEMBER_HASH}
+              fi
+               echo "Adding new member"
+              rm -rf /var/lib/etcd/*
+              # sleep 60s wait endpoint become ready
+              sleep 60
+              mkdir -p /var/lib/etcd/
+              etcdctl member add ${HOSTNAME} http://${HOSTNAME}.${SET_NAME}:2380 | grep "^ETCD_" > /var/lib/etcd/new_member_envs
+              if [ $? -ne 0 ]; then
+                  echo "member add ${HOSTNAME} error."
+                  rm -f /var/lib/etcd/new_member_envs
+                  exit 1
+              fi
+              cat /var/lib/etcd/new_member_envs
+              source /var/lib/etcd/new_member_envs
+              collect_member &
+              exec etcd --name ${HOSTNAME} \
+                  --listen-peer-urls http://${HOSTNAME}.${SET_NAME}:2380 \
+                  --listen-client-urls http://${HOSTNAME}.${SET_NAME}:2379,http://127.0.0.1:2379 \
+                  --advertise-client-urls http://${HOSTNAME}.${SET_NAME}:2379 \
+                  --data-dir /var/lib/etcd/default.etcd \
+                  --initial-advertise-peer-urls http://${HOSTNAME}.${SET_NAME}:2380 \
+                  --initial-cluster ${ETCD_INITIAL_CLUSTER} \
+                  --initial-cluster-state ${ETCD_INITIAL_CLUSTER_STATE}
+          fi
+          for i in $(seq 0 $((${INITIAL_CLUSTER_SIZE} - 1))); do
+              while true; do
+                  echo "Waiting for ${SET_NAME}-${i}.${SET_NAME} to come up"
+                  ping -W 1 -c 1 ${SET_NAME}-${i}.${SET_NAME} > /dev/null && break
+                  sleep 1s
+              done
+          done
+          collect_member &
+          echo "join member ${HOSTNAME}"
+          # join member
+          exec etcd --name ${HOSTNAME} \
+              --initial-advertise-peer-urls http://${HOSTNAME}.${SET_NAME}:2380 \
+              --listen-peer-urls http://${HOSTNAME}.${SET_NAME}:2380 \
+              --listen-client-urls http://${HOSTNAME}.${SET_NAME}:2379,http://127.0.0.1:2379 \
+              --advertise-client-urls http://${HOSTNAME}.${SET_NAME}:2379 \
+              --initial-cluster-token stolon-etcd-cluster \
+              --initial-cluster $(initial_peers) \
+              --initial-cluster-state new \
+              --data-dir /var/lib/etcd/default.etcd
+        env:
+        - name: INITIAL_CLUSTER_SIZE
+          value: "3"
+        - name: SET_NAME
+          value: stolon-etcd
+        - name: GOMAXPROCS
+          value: "8"
+        - name: ETCD_LOG_PACKAGE_LEVELS
+          value: etcdserver/api/v2http=DEBUG
+        image: index-dev.qiniu.io/kelibrary/etcd:v3.1.14
+        imagePullPolicy: IfNotPresent
+        lifecycle:
+          preStop:
+            exec:
+              command:
+              - /bin/sh
+              - -ec
+              - |
+                HOSTNAME=$(hostname)
+                member_hash() {
+                    etcdctl member list | grep http://${HOSTNAME}.${SET_NAME}:2380 | cut -d':' -f1 | cut -d'[' -f1
+                }
+                EPS=""
+                for i in $(seq 0 $((${INITIAL_CLUSTER_SIZE} - 1))); do
+                    EPS="${EPS}${EPS:+,}http://${SET_NAME}-${i}.${SET_NAME}:2379"
+                done
+
+                SET_ID=${HOSTNAME##*-}
+                # adding a new member to existing cluster (assuming all initial pods are available)
+                if [ "${SET_ID}" -ge ${INITIAL_CLUSTER_SIZE} ]; then
+                    echo "Removing ${HOSTNAME} from etcd cluster"
+                    ETCDCTL_ENDPOINT=${EPS} etcdctl member remove $(member_hash)
+                    if [ $? -eq 0 ]; then
+                        # Remove everything otherwise the cluster will no longer scale-up
+                        rm -rf /var/lib/etcd/*
+                    fi
+                fi
+        name: stolon-etcd
+        ports:
+        - containerPort: 2380
+          name: peer
+          protocol: TCP
+        - containerPort: 2379
+          name: client
+          protocol: TCP
+        resources:
+          requests:
+            cpu: "100m"
+            memory: 256Mi
+          limits:
+            cpu: "1"
+            memory: 1Gi
+        volumeMounts:
+        - mountPath: /var/lib/etcd
+          name: stolon-etcd-pvc
+  volumeClaimTemplates:
+  - metadata:
+      name: stolon-etcd-pvc
+    spec:
+      storageClassName: ceph
+      accessModes:
+      - ReadWriteOnce
+      resources:
+        requests:
+          storage: 10Gi
+
+---
+
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    app: stolon-etcd
+  name: stolon-etcd
+  namespace: stolon
+spec:
+  clusterIP: None
+  ports:
+  - name: etcd-server
+    port: 2380
+    protocol: TCP
+    targetPort: 2380
+  - name: etcd-client
+    port: 2379
+    protocol: TCP
+    targetPort: 2379
+  selector:
+    app: stolon-etcd
+  type: ClusterIP
