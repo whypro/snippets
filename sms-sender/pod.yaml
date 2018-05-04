@@ -1,0 +1,16 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: sms-sender
+  namespace: wanghaoyu
+spec:
+  containers:
+  - name: sms-sender
+    image: index-dev.qiniu.io/kelibrary/sms-sender
+    env:
+    - name: MORSE_URL
+      value: https://morse_url
+    - name: MORSE_CLIENT_ID
+      value: your_morse_client_id
+  restartPolicy: Never
+

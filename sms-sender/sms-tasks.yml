@@ -1,0 +1,10 @@
+- name:
+  message: '这是一条测试消息～'
+  triggers:
+    - send_time: 2018-03-29 14:55:00
+      finished: true
+    - send_time: 2018-03-29 15:00:00
+      finished: false
+  recipients:
+    - 17602160001
+
