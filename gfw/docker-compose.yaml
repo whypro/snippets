@@ -1,0 +1,21 @@
+version: "3"
+services:
+  shadowsocks:
+    image: shadowsocks/shadowsocks-libev:v3.3.0
+    command: 
+    - ss-local 
+    - -c 
+    - /etc/shadowsocks/config.json
+    volumes:
+    - ${HOME}/gfw/ss-local.json:/etc/shadowsocks/config.json
+    restart: always
+    network_mode: host
+  polipo:
+    image: vimagick/polipo
+    entrypoint:
+    - polipo
+    - proxyAddress=127.0.0.1
+    - proxyPort=8123 
+    - socksParentProxy=127.0.0.1:1080
+    restart: always
+    network_mode: host
